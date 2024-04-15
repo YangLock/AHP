@@ -3,6 +3,7 @@ import numpy as np
 from collections import defaultdict
 import dgl
 from batch import HEBatchGenerator
+import os
 
 def gen_DGLGraph(args, ground):
     device = 'cuda:{}'.format(args.gpu) if args.gpu != -1 else 'cpu'
@@ -23,7 +24,7 @@ def gen_data(args, dataset_name):
     device = 'cuda:{}'.format(args.gpu) if args.gpu != -1 else 'cpu'
     data_path = None
     try:
-        data_path = f'/data/{dataset_name}.pt'             
+        data_path = os.path.join(args.dataset_path, f"{args.dataset_name}.pt")            
     except:
         raise Exception('dataset {} not supported!'.format(dataset_name))
 

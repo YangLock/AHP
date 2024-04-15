@@ -7,6 +7,8 @@ import torch.optim as optim
 from sklearn import metrics
 from torchmetrics import AveragePrecision
 import os
+import time
+import logging
 from tqdm import tqdm
 
 import utils
@@ -18,10 +20,12 @@ from generator import MLPgenerator
 from training import model_train, model_eval
 
 
-def train(args):
-    os.makedirs(f"/data/checkpoints/{args.folder_name}", exist_ok=True)
-    f_log = open(f"logs/{args.folder_name}_train.log", "w")
-    f_log.write(f"args: {args}\n")
+def train(args, logger: logging.Logger, time_stamp):
+    ckpt_path = os.path.join(args.ckpts_dir, f"{args.exp_name}_{args.dataset_name}_{time_stamp}")
+    
+    if not os.path.exists(ckpt_path):
+        os.makedirs(ckpt_path)
+        
     
     if args.fix_seed:
         np.random.seed(0)
@@ -34,7 +38,8 @@ def train(args):
     for j in tqdm(range(args.exp_num)):    
         # Load data
         args = gen_data(args, args.dataset_name)
-        data_dict = torch.load(f'/data/splits/{args.dataset_name}split{j}.pt')
+        dataset_split_path = os.path.join(args.dataset_path, f"splits/{args.dataset_name}split{j}.pt")
+        data_dict = torch.load(dataset_split_path)
         ground = data_dict["ground_train"] + data_dict["ground_valid"]
         g = gen_DGLGraph(args, ground)  
         train_batchloader = load_train(data_dict, args.bs, device) # only positives
@@ -58,10 +63,10 @@ def train(args):
                 dim = [128, 512, 512, args.nv]
             elif "dblp" in args.dataset_name:
                 dim = [256, 1024, 2048, args.nv]
-            print(f"{args.dataset_name} generator dimension: "+str(dim))
+            logger.info(f"{args.dataset_name} generator dimension: "+str(dim))
             Generator =  MLPgenerator(dim, args.nv, device, size_dist)
         Generator.to(device)
-        average_precision = AveragePrecision()
+        average_precision = AveragePrecision(task="binary")
 
         best_roc = 0
         best_epoch = 0 
@@ -88,45 +93,45 @@ def train(args):
             train_roc = metrics.roc_auc_score(np.array(train_label.cpu()), np.array(train_pred.cpu()))
             train_ap = average_precision(torch.tensor(train_pred), torch.tensor(train_label))            
             
-            f_log.write(f'{epoch} epoch: Training d_loss : {d_loss_sum / count} / Training g_loss : {g_loss_sum / count} /')
-            f_log.write(f'Training roc : {train_roc} / Training ap : {train_ap} \n')
+            logger.info(f'{epoch} epoch: Training d_loss : {d_loss_sum / count} / Training g_loss : {g_loss_sum / count} /')
+            logger.info(f'Training roc : {train_roc} / Training ap : {train_ap} \n')
     
             # Eval validation            
             val_pred_pos, total_label_pos = model_eval(args, val_batchloader_pos, g, model, Aggregator)
             val_pred_sns, total_label_sns = model_eval(args, val_batchloader_sns, g, model, Aggregator)
             auc_roc_sns, ap_sns = utils.measure(total_label_pos+total_label_sns, val_pred_pos+val_pred_sns)
-            f_log.write(f"{epoch} epoch, SNS : Val AP : {ap_sns} / AUROC : {auc_roc_sns}\n")
+            logger.info(f"{epoch} epoch, SNS : Val AP : {ap_sns} / AUROC : {auc_roc_sns}\n")
             val_pred_mns, total_label_mns = model_eval(args, val_batchloader_mns, g, model, Aggregator)
             auc_roc_mns, ap_mns = utils.measure(total_label_pos+total_label_mns, val_pred_pos+val_pred_mns)
-            f_log.write(f"{epoch} epoch, MNS : Val AP : {ap_mns} / AUROC : {auc_roc_mns}\n")
+            logger.info(f"{epoch} epoch, MNS : Val AP : {ap_mns} / AUROC : {auc_roc_mns}\n")
             val_pred_cns, total_label_cns = model_eval(args, val_batchloader_cns, g, model, Aggregator)
             auc_roc_cns, ap_cns = utils.measure(total_label_pos+total_label_cns, val_pred_pos+val_pred_cns)
-            f_log.write(f"{epoch} epoch, CNS : Val AP : {ap_cns} / AUROC : {auc_roc_cns}\n")
+            logger.info(f"{epoch} epoch, CNS : Val AP : {ap_cns} / AUROC : {auc_roc_cns}\n")
             l = len(val_pred_pos)//3
             val_pred_all = val_pred_pos + val_pred_sns[0:l] + val_pred_mns[0:l] + val_pred_cns[0:l]
             total_label_all = total_label_pos + total_label_sns[0:l] + total_label_mns[0:l] + total_label_cns[0:l]
             auc_roc_all, ap_all = utils.measure(total_label_all, val_pred_all)
-            f_log.write(f"{epoch} epoch, ALL : Val AP : {ap_all} / AUROC : {auc_roc_all}\n")
-            f_log.flush()
+            logger.info(f"{epoch} epoch, ALL : Val AP : {ap_all} / AUROC : {auc_roc_all}\n")
+            
             # Save best checkpoint
             if best_roc < (auc_roc_sns+auc_roc_mns+auc_roc_cns)/3:
                 best_roc = (auc_roc_sns+auc_roc_mns+auc_roc_cns)/3
                 best_epoch=epoch
-                torch.save(model.state_dict(), f"/data/checkpoints/{args.folder_name}/model_{j}.pkt")
-                torch.save(Aggregator.state_dict(), f"/data/checkpoints/{args.folder_name}/Aggregator_{j}.pkt")
-                torch.save(Generator.state_dict(), f"/data/checkpoints/{args.folder_name}/Generator_{j}.pkt")
-    f_log.close()
+                torch.save(model.state_dict(), os.path.join(ckpt_path, f"model_{j}.pkt"))
+                torch.save(Aggregator.state_dict(), os.path.join(ckpt_path, f"Aggregator_{j}.pkt"))
+                torch.save(Generator.state_dict(), os.path.join(ckpt_path, f"Generator_{j}.pkt"))
     
-    with open(f"/data/checkpoints/{args.folder_name}/best_epochs.logs", "a") as e_log:  
-        e_log.write(f"exp {j} best epochs: {best_epoch}\n")
+    logger.info(f"exp {j} best epochs: {best_epoch}\n")
+    
     return args
-def test(args, j):    
-    args.checkpoint = f"/data/checkpoints/{args.folder_name}"
-    f_log = open(f"logs/{args.folder_name}_results.log", "w")    
-    f_log.write(f"{args}\n")    
+
+
+def test(args, j, logger: logging.Logger, time_stamp):    
+    ckpt_path = os.path.join(args.ckpts_dir, f"{args.exp_name}_{args.dataset_name}_{time_stamp}")
 
     # Load data
-    data_dict = torch.load(f'/data/splits/{args.dataset_name}split{j}.pt')
+    dataset_split_path = os.path.join(args.dataset_path, f"splits/{args.dataset_name}split{j}.pt")
+    data_dict = torch.load(dataset_split_path)
     args = gen_data(args, args.dataset_name, do_val=True)
     ground = data_dict["ground_train"] + data_dict["ground_valid"]
     g = gen_DGLGraph(args, ground)
@@ -142,11 +147,11 @@ def test(args, j):
     model = models.multilayers(models.HNHN, [args.input_dim, args.dim_vertex, args.dim_edge], \
                     args.n_layers, memory_dim=args.nv, K=args.memory_size)
     model.to(device)
-    model.load_state_dict(torch.load(f"{args.checkpoint}/model_{j}.pkt"))
+    model.load_state_dict(torch.load(os.path.join(ckpt_path, f"model_{j}.pkt")))
     cls_layers = [args.dim_vertex, 128, 8, 1]
     Aggregator = MaxminAggregator(args.dim_vertex, cls_layers)
     Aggregator.to(device)
-    Aggregator.load_state_dict(torch.load(f"{args.checkpoint}/Aggregator_{j}.pkt"))
+    Aggregator.load_state_dict(torch.load(os.path.join(ckpt_path, f"Aggregator_{j}.pkt")))
     
     model.eval()
     Aggregator.eval()
@@ -155,26 +160,27 @@ def test(args, j):
         test_pred_pos, total_label_pos = model_eval(args, test_batchloader_pos, g, model, Aggregator)
         test_pred_sns, total_label_sns = model_eval(args, test_batchloader_sns, g, model, Aggregator)
         auc_roc_sns, ap_sns = utils.measure(total_label_pos+total_label_sns, test_pred_pos+test_pred_sns)
-        f_log.write(f"SNS : Test AP : {ap_sns} / AUROC : {auc_roc_sns}\n")
+        logger.info(f"SNS : Test AP : {ap_sns} / AUROC : {auc_roc_sns}\n")
         test_pred_mns, total_label_mns = model_eval(args, test_batchloader_mns, g, model, Aggregator)
         auc_roc_mns, ap_mns = utils.measure(total_label_pos+total_label_mns, test_pred_pos+test_pred_mns)
-        f_log.write(f"MNS : Test AP : {ap_mns} / AUROC : {auc_roc_mns}\n")
+        logger.info(f"MNS : Test AP : {ap_mns} / AUROC : {auc_roc_mns}\n")
         test_pred_cns, total_label_cns = model_eval(args, test_batchloader_cns, g, model, Aggregator)
         auc_roc_cns, ap_cns = utils.measure(total_label_pos+total_label_cns, test_pred_pos+test_pred_cns)
-        f_log.write(f"CNS : Test AP : {ap_cns} / AUROC : {auc_roc_cns}\n")
+        logger.info(f"CNS : Test AP : {ap_cns} / AUROC : {auc_roc_cns}\n")
         l = len(test_pred_pos)//3
         test_pred_all = test_pred_pos + test_pred_sns[0:l] + test_pred_mns[0:l] + test_pred_cns[0:l]
         total_label_all = total_label_pos + total_label_sns[0:l] + total_label_mns[0:l] + total_label_cns[0:l]
         auc_roc_all, ap_all = utils.measure(total_label_all, test_pred_all)
-        f_log.write(f"ALL : Test AP : {ap_all} / AUROC : {auc_roc_all}\n")
-        f_log.flush()
+        logger.info(f"ALL : Test AP : {ap_all} / AUROC : {auc_roc_all}\n")
+
         
 if __name__ == "__main__":
+    time_stamp = time.strftime('%m%d-%H:%M')
     args = utils.parse_args()
-    args.folder_name = "exp1"
-    train(args)
+    args.exp_name = "exp1"
+    logger = utils.get_logger(args)
+    utils.print_summary(args, logger)
+    train(args, logger, time_stamp)
     args = utils.parse_args()
     for j in range(args.exp_num):
-        test(args, j)
-
-    
+        test(args, j, logger, time_stamp)

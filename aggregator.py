@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
 
+
 class MeanAggregator(nn.Module):
     def __init__(self, dim_vertex, layers):
         super(MeanAggregator, self).__init__()
@@ -23,7 +24,6 @@ class MeanAggregator(nn.Module):
         return embedding
     
     def classify(self, embedding) :
-#         pdb.set_trace()
         embedding = torch.linalg.norm(embedding.unsqueeze(0),dim=0)      
         return self.cls(embedding)
     
