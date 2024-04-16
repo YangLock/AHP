@@ -49,13 +49,18 @@ def train(args, logger: logging.Logger, time_stamp):
         val_batchloader_cns = load_val(data_dict, args.bs, device, label="cns")
     
         # Initialize models
+        # Hypergraph neural network (HNHN)
         model = models.multilayers(models.HNHN, [args.input_dim, args.dim_vertex, args.dim_edge], \
                         args.n_layers, memory_dim=args.nv, K=args.memory_size)
-        model.to(device)        
+        model.to(device)     
+        
+        # Aggregator   
         Aggregator = None    
         cls_layers = [args.dim_vertex, 128, 8, 1]
         Aggregator = MaxminAggregator(args.dim_vertex, cls_layers)
         Aggregator.to(device)  
+        
+        # Generator
         size_dist = utils.gen_size_dist(ground)
         if args.gen == "MLP":
             dim = [64, 256, 256, args.nv]
@@ -66,19 +71,29 @@ def train(args, logger: logging.Logger, time_stamp):
             logger.info(f"{args.dataset_name} generator dimension: "+str(dim))
             Generator =  MLPgenerator(dim, args.nv, device, size_dist)
         Generator.to(device)
+        
+        # Initialize AP metric
         average_precision = AveragePrecision(task="binary")
 
         best_roc = 0
         best_epoch = 0 
+        
+        # Initialize optimizer for descrimintor and generator
         optim_D = torch.optim.RMSprop(list(model.parameters())+list(Aggregator.parameters()), lr=args.D_lr)
         optim_G = torch.optim.RMSprop(Generator.parameters(), lr=args.G_lr)
         
-        for epoch in tqdm(range(args.epochs), leave=False):            
+        logger.info(f'============================================ Training (split:{j}) ==================================================')
+        logger.info('#Epoch \t [Train ROC] \t [Train AP] \t [Train Loss] D | G \t [ROC] SNS | MNS | CNS | Mixed | Average \t [AP] SNS | MNS | CNS | Mixed | Average')
+
+        patience_epoch = 0
+        
+        for epoch in range(args.epochs):            
             train_pred, train_label = [], []
             d_loss_sum, g_loss_sum, count  = 0.0, 0.0, 0
             
             # Train
             while True :
+                # Iterate each hyperedge batch
                 pos_hedges, pos_labels, is_last = train_batchloader.next()
                 d_loss, g_loss, train_pred, train_label = model_train(args, g, model, Aggregator, Generator, optim_D, optim_G, pos_hedges, pos_labels, train_pred, train_label, device, epoch)
                 d_loss_sum += d_loss
@@ -91,48 +106,74 @@ def train(args, logger: logging.Logger, time_stamp):
             train_pred = train_pred.squeeze()
             train_label = torch.round(torch.cat(train_label, dim=0))        
             train_roc = metrics.roc_auc_score(np.array(train_label.cpu()), np.array(train_pred.cpu()))
-            train_ap = average_precision(torch.tensor(train_pred), torch.tensor(train_label))            
+            train_ap = average_precision(torch.tensor(train_pred), torch.tensor(train_label, dtype=torch.long))            
             
-            logger.info(f'{epoch} epoch: Training d_loss : {d_loss_sum / count} / Training g_loss : {g_loss_sum / count} /')
-            logger.info(f'Training roc : {train_roc} / Training ap : {train_ap} \n')
+            train_d_loss = d_loss_sum / count
+            train_g_loss = g_loss_sum / count
     
-            # Eval validation            
-            val_pred_pos, total_label_pos = model_eval(args, val_batchloader_pos, g, model, Aggregator)
-            val_pred_sns, total_label_sns = model_eval(args, val_batchloader_sns, g, model, Aggregator)
-            auc_roc_sns, ap_sns = utils.measure(total_label_pos+total_label_sns, val_pred_pos+val_pred_sns)
-            logger.info(f"{epoch} epoch, SNS : Val AP : {ap_sns} / AUROC : {auc_roc_sns}\n")
-            val_pred_mns, total_label_mns = model_eval(args, val_batchloader_mns, g, model, Aggregator)
-            auc_roc_mns, ap_mns = utils.measure(total_label_pos+total_label_mns, val_pred_pos+val_pred_mns)
-            logger.info(f"{epoch} epoch, MNS : Val AP : {ap_mns} / AUROC : {auc_roc_mns}\n")
-            val_pred_cns, total_label_cns = model_eval(args, val_batchloader_cns, g, model, Aggregator)
-            auc_roc_cns, ap_cns = utils.measure(total_label_pos+total_label_cns, val_pred_pos+val_pred_cns)
-            logger.info(f"{epoch} epoch, CNS : Val AP : {ap_cns} / AUROC : {auc_roc_cns}\n")
-            l = len(val_pred_pos)//3
-            val_pred_all = val_pred_pos + val_pred_sns[0:l] + val_pred_mns[0:l] + val_pred_cns[0:l]
-            total_label_all = total_label_pos + total_label_sns[0:l] + total_label_mns[0:l] + total_label_cns[0:l]
-            auc_roc_all, ap_all = utils.measure(total_label_all, val_pred_all)
-            logger.info(f"{epoch} epoch, ALL : Val AP : {ap_all} / AUROC : {auc_roc_all}\n")
+            # Evaluation phase           
+            # 1. positive dataset + four negative datasets (SNS, MNS, CNS, and Mixed)
+            val_pred_pos, total_label_pos = model_eval(args, val_batchloader_pos, g, model, Aggregator)  # POS
+            val_pred_sns, total_label_sns = model_eval(args, val_batchloader_sns, g, model, Aggregator)  # SNS
+            val_pred_mns, total_label_mns = model_eval(args, val_batchloader_mns, g, model, Aggregator)  # MNS
+            val_pred_cns, total_label_cns = model_eval(args, val_batchloader_cns, g, model, Aggregator)  # CNS
             
-            # Save best checkpoint
-            if best_roc < (auc_roc_sns+auc_roc_mns+auc_roc_cns)/3:
-                best_roc = (auc_roc_sns+auc_roc_mns+auc_roc_cns)/3
-                best_epoch=epoch
+            # POS + SNS validation set
+            auc_roc_sns, ap_sns = utils.measure(total_label_pos+total_label_sns, val_pred_pos+val_pred_sns)
+            
+            # POS + MNS validation set
+            auc_roc_mns, ap_mns = utils.measure(total_label_pos+total_label_mns, val_pred_pos+val_pred_mns)
+            
+            # POS + CNS validation set
+            auc_roc_cns, ap_cns = utils.measure(total_label_pos+total_label_cns, val_pred_pos+val_pred_cns)
+
+            # Mixed(POS + M + S + C) validation set
+            l = len(val_pred_pos) // 3
+            val_pred_mixed = val_pred_pos + val_pred_sns[0:l] + val_pred_mns[0:l] + val_pred_cns[0:l]
+            total_label_mixed = total_label_pos + total_label_sns[0:l] + total_label_mns[0:l] + total_label_cns[0:l]
+            auc_roc_mixed, ap_mixed = utils.measure(total_label_mixed, val_pred_mixed)
+            
+            # Calculate average AP and AUROC over four test set
+            auc_roc_average = (auc_roc_sns + auc_roc_mns + auc_roc_cns + auc_roc_mixed) / 4
+            ap_average = (ap_sns + ap_mns + ap_cns + ap_mixed) / 4
+            
+            # Log all info
+            logger.info(f" {epoch}: \t {train_roc:.4f} \t     {train_ap:.4f} \t      {train_d_loss:.4f} {train_g_loss:.4f} \t     {auc_roc_sns:.4f} {auc_roc_mns:.4f} {auc_roc_cns:.4f} {auc_roc_mixed:.4f} {auc_roc_average:.4f} \t     {ap_sns:.4f} {ap_mns:.4f} {ap_cns:.4f} {ap_mixed:.4f} {ap_average:.4f}")
+            
+            # Save best checkpoint on auc_roc_average
+            if best_roc < auc_roc_average:
+                best_roc = auc_roc_average
+                best_epoch = epoch
+                patience_epoch = 0
+                
                 torch.save(model.state_dict(), os.path.join(ckpt_path, f"model_{j}.pkt"))
                 torch.save(Aggregator.state_dict(), os.path.join(ckpt_path, f"Aggregator_{j}.pkt"))
                 torch.save(Generator.state_dict(), os.path.join(ckpt_path, f"Generator_{j}.pkt"))
+            else:
+                patience_epoch += 1
+                if patience_epoch >= args.patience:
+                    logger.info("=== Early Stopping")
+                    break
     
-    logger.info(f"exp {j} best epochs: {best_epoch}\n")
+    logger.info(' ')
+    logger.info(f"=====\t Split: {j} \t Best AUROC: {best_roc:.4f} Best Epoch: {best_epoch} \t=====")
+    logger.info(' ')
     
     return args
 
 
-def test(args, j, logger: logging.Logger, time_stamp):    
+def test(args, j, logger: logging.Logger, time_stamp): 
+    # Get the correct path of checkpoints   
     ckpt_path = os.path.join(args.ckpts_dir, f"{args.exp_name}_{args.dataset_name}_{time_stamp}")
 
+    logger.info(' ')
+    logger.info(f'=========================================== Test (Split: {j}) ================================================')
+    logger.info('[ROC] SNS | MNS | CNS | Mixed | Average \t [AP] SNS | MNS | CNS | Mixed | Average')
+    
     # Load data
     dataset_split_path = os.path.join(args.dataset_path, f"splits/{args.dataset_name}split{j}.pt")
     data_dict = torch.load(dataset_split_path)
-    args = gen_data(args, args.dataset_name, do_val=True)
+    args = gen_data(args, args.dataset_name)
     ground = data_dict["ground_train"] + data_dict["ground_valid"]
     g = gen_DGLGraph(args, ground)
     device = 'cuda:{}'.format(args.gpu) if args.gpu != -1 else 'cpu'
@@ -156,31 +197,48 @@ def test(args, j, logger: logging.Logger, time_stamp):
     model.eval()
     Aggregator.eval()
 
+    # Test phase
     with torch.no_grad():
-        test_pred_pos, total_label_pos = model_eval(args, test_batchloader_pos, g, model, Aggregator)
-        test_pred_sns, total_label_sns = model_eval(args, test_batchloader_sns, g, model, Aggregator)
+        # 1. positive dataset + four negative datasets (SNS, MNS, CNS, and MIXED)
+        test_pred_pos, total_label_pos = model_eval(args, test_batchloader_pos, g, model, Aggregator)  # POS
+        test_pred_sns, total_label_sns = model_eval(args, test_batchloader_sns, g, model, Aggregator)  # SNS
+        test_pred_mns, total_label_mns = model_eval(args, test_batchloader_mns, g, model, Aggregator)  # MNS
+        test_pred_cns, total_label_cns = model_eval(args, test_batchloader_cns, g, model, Aggregator)  # CNS
+        
+        # POS + SNS test set
         auc_roc_sns, ap_sns = utils.measure(total_label_pos+total_label_sns, test_pred_pos+test_pred_sns)
-        logger.info(f"SNS : Test AP : {ap_sns} / AUROC : {auc_roc_sns}\n")
-        test_pred_mns, total_label_mns = model_eval(args, test_batchloader_mns, g, model, Aggregator)
+        
+        # POS + MNS test set
         auc_roc_mns, ap_mns = utils.measure(total_label_pos+total_label_mns, test_pred_pos+test_pred_mns)
-        logger.info(f"MNS : Test AP : {ap_mns} / AUROC : {auc_roc_mns}\n")
-        test_pred_cns, total_label_cns = model_eval(args, test_batchloader_cns, g, model, Aggregator)
+        
+        # POS + CNS test set
         auc_roc_cns, ap_cns = utils.measure(total_label_pos+total_label_cns, test_pred_pos+test_pred_cns)
-        logger.info(f"CNS : Test AP : {ap_cns} / AUROC : {auc_roc_cns}\n")
+        
+        # Mixed(POS + M + S + C) test set
         l = len(test_pred_pos)//3
-        test_pred_all = test_pred_pos + test_pred_sns[0:l] + test_pred_mns[0:l] + test_pred_cns[0:l]
-        total_label_all = total_label_pos + total_label_sns[0:l] + total_label_mns[0:l] + total_label_cns[0:l]
-        auc_roc_all, ap_all = utils.measure(total_label_all, test_pred_all)
-        logger.info(f"ALL : Test AP : {ap_all} / AUROC : {auc_roc_all}\n")
+        test_pred_mixed = test_pred_pos + test_pred_sns[0:l] + test_pred_mns[0:l] + test_pred_cns[0:l]
+        total_label_mixed = total_label_pos + total_label_sns[0:l] + total_label_mns[0:l] + total_label_cns[0:l]
+        auc_roc_mixed, ap_mixed = utils.measure(total_label_mixed, test_pred_mixed)
+        
+        auc_roc_average = (auc_roc_sns + auc_roc_mns + auc_roc_cns + auc_roc_mixed) / 4
+        ap_average = (ap_sns + ap_mns + ap_cns + ap_mixed) / 4
+        
+        logger.info(f"    {auc_roc_sns:.4f} {auc_roc_mns:.4f} {auc_roc_cns:.4f} {auc_roc_mixed:.4f} {auc_roc_average:.4f} \t     {ap_sns:.4f} {ap_mns:.4f} {ap_cns:.4f} {ap_mixed:.4f} {ap_average:.4f}")
 
         
 if __name__ == "__main__":
     time_stamp = time.strftime('%m%d-%H:%M')
+    exp_name = "exp1"
+    
+    # train
     args = utils.parse_args()
-    args.exp_name = "exp1"
+    args.exp_name = exp_name
     logger = utils.get_logger(args)
     utils.print_summary(args, logger)
     train(args, logger, time_stamp)
+    
+    # test
     args = utils.parse_args()
+    args.exp_name = exp_name
     for j in range(args.exp_num):
         test(args, j, logger, time_stamp)

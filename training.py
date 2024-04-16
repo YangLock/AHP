@@ -115,8 +115,10 @@ def model_train(args, g, model, Aggregator, Generator, optim_D, optim_G, pos_hed
             model.memory = memory_candidate[indices[:args.memory_size]]
             replaced_indice = indices[:args.memory_size]
             replaced_indice[replaced_indice>=args.bs]=0
+
     return d_loss.item(), g_loss.item(), train_pred, train_label
             
+
 def model_eval(args, test_batchloader, g, model, Aggregator):
     model.eval()
     Aggregator.eval()

@@ -12,6 +12,7 @@ warnings.filterwarnings('ignore')
 from sklearn import metrics
 from torchmetrics import AveragePrecision
 
+
 def parse_args():
     parser = argparse.ArgumentParser()
     
@@ -22,17 +23,19 @@ def parse_args():
     parser.add_argument("--logs_dir", type=str, default="./logs", help="The directory path of logs")
     parser.add_argument("--exp_name", type=str, default='', help="The name of current experiment")
     parser.add_argument("--seed", dest='fix_seed', action='store_const', default=False, const=True, help='Fix seed for reproducibility and fair comparison.')
-    parser.add_argument("--gpu", type=int, default=4, help='gpu number. -1 if cpu else gpu number')
+    parser.add_argument("--gpu", type=int, default=0, help='gpu number. -1 if cpu else gpu number')
     parser.add_argument("--exp_num", default=1, type=int, help='number of experiments')
     parser.add_argument("--epochs", default=200, type=int, help='number of epochs')
+    parser.add_argument("--patience", type=int, default=20, help="The patience step for early stopping")
     parser.add_argument("--bs", default=32, type=int, help='batch size')
     parser.add_argument("--train_DG", default="epoch1:1", type=str, help='update ratio in epochs (D updates:G updates)')
-    parser.add_argument("--testns", type=str, default='SMCA', help='test negative sampler')
+    parser.add_argument("--testns", type=str, default='SMCM', help='test negative sampler(SNS, MNS, CNS, MIXED)')
     parser.add_argument("--clip", type=float, default='0.01', help='weight clipping')
     parser.add_argument("--training", type=str, default='wgan', help='loss objective: wgan, none')
     parser.add_argument("--D_lr", default=0.001, type=float, help='learning rate')
     parser.add_argument("--G_lr", default=0.001, type=float, help='learning rate')
     parser.add_argument("--memory_size", default=32, type=int, help="The size of memory bank")
+    parser.add_argument("--memory_type", type=str, default="sample", help="The type of memory bank")
     
     
     ##### Discriminator architecture #####
@@ -63,6 +66,7 @@ def print_summary(args, logger: logging.Logger):
     logger.info('    - GPU INDEX = %s' % (args.gpu))
     logger.info('    - EXP NUM = %s' % (args.exp_num))
     logger.info('    - EPOCHS = %s' % (args.epochs))
+    logger.info('    - PATIENCE = %s' % (args.patience))
     logger.info('    - BATCH SIZE = %s' % (args.bs))
     logger.info('    - DG UPDATE RATIO = %s' % (args.train_DG))
     logger.info('    - TEST NEGATIVE SAMPLER = %s' % (args.testns))
@@ -70,6 +74,9 @@ def print_summary(args, logger: logging.Logger):
     logger.info('    - LOSS OBJECTIVE = %s' % (args.training))
     logger.info('    - D LEARNING RATE = ' + str(args.D_lr))
     logger.info('    - G LEARNING RATE = ' + str(args.G_lr))
+    logger.info('    - MEMORY SIZE = %s' % (args.memory_size))
+    logger.info('    - MEMORY TYPE = %s' % (args.memory_type))
+    
     logger.info(' ')
     logger.info('    - DISCRIMINATOR = %s' % (args.model))
     logger.info('    - NUM LAYERS = ' + str(args.n_layers))
@@ -136,7 +143,7 @@ def unsqueeze_onehot(onehot):
 
 
 def measure(label, pred):
-    average_precision = AveragePrecision()
+    average_precision = AveragePrecision(task="binary")
     auc_roc = metrics.roc_auc_score(np.array(label), np.array(pred))
-    ap = average_precision(torch.tensor(pred), torch.tensor(label))
+    ap = average_precision(torch.tensor(pred), torch.tensor(label, dtype=torch.long))
     return auc_roc, ap
